@@ -1,23 +1,27 @@
 import argparse
+import contextlib
 import json
+import os
+import pickle
 from pathlib import Path
-from joblib import Parallel, delayed
 
+import joblib
+import networkx as nx
 import openai
+from joblib import Parallel, delayed
 from langchain.text_splitter import RecursiveCharacterTextSplitter
-from tqdm import tqdm
-
 from tenacity import (
     retry,
     stop_after_attempt,
     wait_random_exponential,
 )
-import contextlib
-import joblib
+from tqdm import tqdm
+
 
 @contextlib.contextmanager
 def tqdm_joblib(tqdm_object):
     """Context manager to patch joblib to report into tqdm progress bar given as argument"""
+
     class TqdmBatchCompletionCallback(joblib.parallel.BatchCompletionCallBack):
         def __call__(self, *args, **kwargs):
             tqdm_object.update(n=self.batch_size)
@@ -30,6 +34,7 @@ def tqdm_joblib(tqdm_object):
     finally:
         joblib.parallel.BatchCompletionCallBack = old_batch_callback
         tqdm_object.close()
+
 
 SYSTEM_PROMPT = """I will provide you with a news article labeled as INPUT_NEWS. Your task is to extract structured information from it in the form of triplets for constructing knowledge graph. Each triplet should be in the form of (h:type, r, o:type), where 'h' stands for the head entity, 'r' for the relationship, and 'o' for the tail entity. The 'type' denotes the category of the corresponding entity.
 
@@ -74,7 +79,7 @@ The Relationships r between these entities must be represented by one of the fol
 - Your output should strictly consist of a list of triplets and nothing else. Do NOT include redundant triplets or triplets with numerical or date entities.
 
 """
-    
+
 USER_PROMPT = """
 ### Example:
 Consider the following news excerpt:  
@@ -94,20 +99,19 @@ Now, let's apply this process to the following INPUT_NEWS:
 """
 
 
-
 def main():
     parser = argparse.ArgumentParser()
-    parser.add_argument('--input', type=str, required=True, help='specify input jsonl')
-    parser.add_argument('--joblib', type=int, default=1, help='use joblib (1 means no parallelism)')
+    parser.add_argument("--input", type=str, required=True, help="specify input jsonl")
+    parser.add_argument("--joblib", type=int, default=1, help="use N joblib processes (1 means no parallelism)")
     args = parser.parse_args()
     args.input = Path(args.input).resolve()
-    
+
     text_splitter = RecursiveCharacterTextSplitter(chunk_size=4096 * 2, chunk_overlap=0)
     chunks = []
-    with open(args.input, 'r', encoding='utf-8') as f:
+    with open(args.input, "r", encoding="utf-8") as f:
         for l in f:
             tmp = json.loads(l)
-            splits = text_splitter.split_text(tmp['content'])
+            splits = text_splitter.split_text(tmp["content"])
             for j, doc in enumerate(splits):
                 new_record = dict(**tmp)
                 new_record["content"] = doc
@@ -118,44 +122,69 @@ def main():
 
     results = []
     # Process each document (two attempts)
+
     def process_doc(doc):
         @retry(wait=wait_random_exponential(multiplier=1, max=8), stop=stop_after_attempt(4))
         def completion_with_backoff():
             client = openai.Client(
-                api_key="your-api-key-here",  # Replace with your actual API key
-                base_url="http://128.174.212.200:11435/v1",
+                api_key=os.getenv("OPENAI_API_KEY"),
+                base_url="your-base-url-here",  # Replace with your actual base URL
             )
             completion = client.chat.completions.create(
                 model="llama",
                 messages=[
                     {"role": "system", "content": SYSTEM_PROMPT},
-                    {"role": "user", "content": USER_PROMPT + doc['content']}
+                    {"role": "user", "content": USER_PROMPT + doc["content"]},
                 ],
                 temperature=0.0,
-                response_format={ "type": "json_object" }
+                response_format={"type": "json_object"},
             )
             try:
                 triplets = json.loads(completion.choices[0].message.content)
             except Exception:
-                print("error", doc['url'], doc['chunk_seq'])
+                print("error", doc["url"], doc["chunk_seq"])
                 triplets = []
             return triplets
-        
+
         triplets = completion_with_backoff()
-        return {"url": doc['url'], "chunk_seq": doc['chunk_seq'], "triplets": triplets}
+        return {"url": doc["url"], "chunk_seq": doc["chunk_seq"], "triplets": triplets}
+
     if args.joblib == 1:
         for doc in tqdm(chunks, ncols=100):
             results.append(process_doc(doc))
     else:
         with tqdm_joblib(tqdm(chunks, ncols=100)):
             results = Parallel(n_jobs=args.joblib)(delayed(process_doc)(doc) for doc in chunks)
-        
-    Path('../../data/kg').mkdir(parents=True, exist_ok=True)
-    with open("../../data/kg/chunks.jsonl", "w", encoding='utf-8') as f:
+    Path("../../data/kg").mkdir(parents=True, exist_ok=True)
+    with open("../../data/kg/chunks.jsonl", "w", encoding="utf-8") as f:
         for result in results:
             f.write(json.dumps(result) + "\n")
-    print("Done")
-    
+    print("Extraction completed")
+
+    G = nx.DiGraph()
+    for triplet in tqdm(results, ncols=100):
+        if len(triplet) != 3:
+            continue
+        keys = list(triplet.keys())
+
+        head = keys[0]
+        relation = keys[1]
+        tail = keys[2]
+
+        head_type = triplet[head]
+        tail_type = triplet[tail]
+
+        head = head.replace("_", " ")
+        tail = tail.replace("_", " ")
+        relation = relation.replace("_", " ")
+        if not G.has_node(head):
+            G.add_node(head, kind=head_type)
+        if not G.has_node(tail):
+            G.add_node(tail, kind=tail_type)
+        G.add_edge(head, tail, relation=relation)
+    with open("../../data/kg/kg.pkl", "wb") as f:
+        pickle.dump(G, f)
+
 
 if __name__ == "__main__":
     main()
