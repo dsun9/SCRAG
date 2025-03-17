@@ -16,6 +16,11 @@ SCRAG is a predictive framework designed to forecast community responses to real
 
 ### Preprocessing
 
+Create a Python 3.10 environment and install the required packages:
+```bash
+pip install -r requirements.txt
+```
+
 Initialize the Milvus DB by running:
 ```bash
 cd milvus
