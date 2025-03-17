@@ -6,14 +6,15 @@ SCRAG is a predictive framework designed to forecast community responses to real
 
 ## Features
 
-- Community-Aware Historical Response Retrieval: Captures ideological, semantic, and emotional aspects of past responses to inform predictions.
-- Retrieval-Augmented Generation (RAG): Integrates external knowledge from news sources and knowledge graphs to provide up-to-date context.
+- Social Computing-Inspired Retrieval-Augmented Generation (RAG):
+  - Historical Response Retrieval Module: Captures ideological, semantic, and emotional aspects of past responses to inform predictions.
+  - External Knowledge Retrieval Module: Integrates external knowledge from news sources and knowledge graphs to provide up-to-date context.
 - Modular and Adaptable: Compatible with various embedding models and LLMs for flexibility.
 - Comprehensive Evaluation: Tested across six real-world scenarios on the X platform (formerly Twitter), demonstrating over 10% improvements in key evaluation metrics.
 
 ## Running the framework
 
-The following steps are for preprocessing.
+### Preprocessing
 
 Initialize the Milvus DB by running:
 ```bash
@@ -58,6 +59,8 @@ python emb_and_push_splade_kg.py \
 ```
 
 Set the necessary environment variables including `OPENAI_API_KEY` and `VOYAGE_API_KEY`.
+
+### Forecasting
 
 Run the framework by modifying `src/scrag.py`:
 ```bash
