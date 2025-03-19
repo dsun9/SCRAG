@@ -19,6 +19,7 @@ from common import (
     strip_enclosing_quotes,
     process_mentions,
     distribute_budget,
+    gen_community_summary,
     gen_user_prompt,
     is_doc_relevant,
     run_prompt,
@@ -211,7 +212,7 @@ class SCRAG:
             csamples.append(clusters[cid])
         return csizes, csamples
 
-    def predict_parallel(self, input_post, total=30, n_jobs=32):
+    def predict_parallel(self, input_post, total=30, find_k=40, trace_k=30, ext_k=5, sample_k=5, n_jobs=32):
         query_dense_vec, relevant_similar_posts = self.find_similar_post(input_post)
         relevant_responses = self.trace_engagement(query_dense_vec, relevant_similar_posts)
         sparse_articles, sparse_relations = self.find_relevant_external_doc(input_post)
@@ -222,8 +223,12 @@ class SCRAG:
         relations = "\n".join(x.page_content for x in sparse_relations)
         prompts = []
         for cidx, (ncnt, samples) in enumerate(zip(dist, csamples)):
+            community_summary = gen_community_summary(self.llm_model, self.llm_base_url, [G.nodes[n]["doc_enc"] for n in samples[:sample_k]])
             USER_PROMPT = gen_user_prompt(
-                sparse_articles[:5], relations, [G.nodes[n]["doc_enc"] for n in samples[:5]], input_post
+                sparse_articles, relations, 
+                [G.nodes[n]["doc_enc"] for n in samples[:sample_k]],
+                community_summary,
+                input_post
             )
             for _ in range(ncnt):
                 prompts.append(
@@ -234,8 +239,6 @@ class SCRAG:
                                 {"role": "developer" if "gpt-4o" in self.llm_model else "system", "content": SYSTEM_PROMPT},
                                 {"role": "user", "content": USER_PROMPT},
                             ]
-                            if self.llm_model != "gemma"
-                            else [{"role": "user", "content": SYSTEM_PROMPT + "\n" + USER_PROMPT}]
                         ),
                         "seed": np.random.randint(2**32),
                         "temperature": 1.2,
@@ -247,10 +250,10 @@ class SCRAG:
             rets = Parallel(n_jobs=n_jobs)(delayed(run_prompt)(self.llm_base_url, p) for p in prompts)
         return [process_mentions(strip_enclosing_quotes(r["choices"][0]["message"]["content"])) for r in rets]
 
-    def predict(self, input_post, total=30):
-        query_dense_vec, relevant_similar_posts = self.find_similar_post(input_post)
-        relevant_responses = self.trace_engagement(query_dense_vec, relevant_similar_posts)
-        sparse_articles, sparse_relations = self.find_relevant_external_doc(input_post)
+    def predict(self, input_post, total=30, find_k=40, trace_k=30, ext_k=5, sample_k=5):
+        query_dense_vec, relevant_similar_posts = self.find_similar_post(input_post, k=find_k)
+        relevant_responses = self.trace_engagement(query_dense_vec, relevant_similar_posts, k=trace_k)
+        sparse_articles, sparse_relations = self.find_relevant_external_doc(input_post, k=ext_k)
         csizes, csamples = self.find_communities(relevant_responses)
         dist = distribute_budget(total, csizes)
         assert len(dist) == len(csamples)
@@ -260,14 +263,18 @@ class SCRAG:
         rets = []
         pbar = tqdm(total=total, desc="Generating", ncols=100)
         for cidx, (ncnt, samples) in enumerate(zip(dist, csamples)):
-            USER_PROMPT = gen_user_prompt(sparse_articles, relations, [G.nodes[n]["doc_enc"] for n in samples], input_post)
+            community_summary = gen_community_summary(self.llm_model, self.llm_base_url, [G.nodes[n]["doc_enc"] for n in samples[:sample_k]])
+            USER_PROMPT = gen_user_prompt(
+                sparse_articles, relations, 
+                [G.nodes[n]["doc_enc"] for n in samples[:sample_k]],
+                community_summary,
+                input_post
+            )
             cluster_rets = (
                 [
                     {"role": "developer" if "gpt-4o" in self.llm_model else "system", "content": SYSTEM_PROMPT},
                     {"role": "user", "content": USER_PROMPT},
                 ]
-                if self.llm_model != "gemma"
-                else [{"role": "user", "content": SYSTEM_PROMPT + "\n" + USER_PROMPT}]
             )
             initial_res = run_prompt(
                 self.llm_base_url,
@@ -281,6 +288,7 @@ class SCRAG:
                 },
             )
             rets.append(initial_res)
+            pbar.update()
             cluster_rets.extend(
                 [
                     {"role": "assistant", "content": strip_enclosing_quotes(initial_res["choices"][0]["message"]["content"])},
@@ -313,18 +321,19 @@ class SCRAG:
 
 if __name__ == "__main__":
     G = pd.read_pickle("../data/graph/G.pkl")
-    embs = pd.read_pickle("../data/intermediates/all_doc_nv2_inst_umap128.pkl")
+    embs = pd.read_pickle("../data/intermediates/all_doc_voyage_inst_umap128.pkl")
     belief_embs = pd.read_pickle("../data/intermediates/all_data_belief_emb.pkl")
-    emb_umapper = pd.read_pickle("../data/intermediates/all_doc_nv2_inst.umapper")
+    emb_umapper = pd.read_pickle("../data/intermediates/all_doc_voyage_inst.umapper")
     sparse_embedder = SpladeEmbedding()
-    # dense_embedder = Nv2Embedding(instruction="Represent the query for retrieving supporting documents.\n", device_map='cpu')
 
+    # dense_embedder = Nv2Embedding(instruction="Represent the query for retrieving supporting documents.\n", device_map='cpu')
     dense_embedder = VoyageAIEmbeddings(
         model="voyage-3-large",
         api_key=os.getenv("VOYAGE_API_KEY"),
         batch_size=128,
     )
 
-    scrag = SCRAG(G, embs, belief_embs, emb_umapper, "gpt-4o-mini", None)  # llm_model and llm_base_url
+    # scrag = SCRAG(G, embs, belief_embs, emb_umapper, "gpt-4o-mini", None)
+    scrag = SCRAG(G, embs, belief_embs, emb_umapper, "llama3.3-70b", "http://localhost:11435/v1")  # llm_model and llm_base_url (hosted by vLLM)
     scrag.init_vectorstore(sparse_embedder, dense_embedder, "news_splade", "news_kg", "docs_voyage_inst")
-    scrag.predict("<Testing input here>", total=30)
+    print('\n'.join(scrag.predict("<Hypothetical post>", total=30)))

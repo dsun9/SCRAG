@@ -1,4 +1,5 @@
 import contextlib
+import json
 import os
 import re
 
@@ -6,6 +7,7 @@ import joblib
 import pandas as pd
 from langchain_core.embeddings import Embeddings
 from openai import OpenAI
+from pydantic import BaseModel
 from pymilvus import model as milvus_model
 from tenacity import (
     retry,
@@ -13,6 +15,11 @@ from tenacity import (
     wait_random_exponential,
 )
 
+
+class IdeologySummary(BaseModel):
+    ideology: str
+    description: str
+    reasoning: str
 
 class QueryEmbeddingFromDict(Embeddings):
     def __init__(self, dictionary, **kwargs):
@@ -162,7 +169,7 @@ def run_prompt(base_url, prompt):
     return res.model_dump()
 
 
-def is_doc_relevant(LLM_MODEL, base_url, post_a, post_b):
+def is_doc_relevant(llm_model, base_url, post_a, post_b):
     SYSTEM_PROMPT = """You are an X (Twitter) user who browses diverse content and likes to interact. You know world news and geopolitical matters.
 
 When given two posts that are either original posts or replies/responses to another post (context attached), you will answer the question of whether the two posts are related, thinking similarly, or expressing similar beliefs under potentially different scenarios. You will only answer "yes" or "no". When ambiguous, you will answer "no".
@@ -184,8 +191,11 @@ Answer:
     def inner():
         client = OpenAI(api_key=os.getenv("OPENAI_API_KEY"), base_url=base_url)
         return client.chat.completions.create(
-            model=LLM_MODEL,
-            messages=[{"role": "system", "content": SYSTEM_PROMPT}, {"role": "user", "content": USER_PROMPT}],
+            model=llm_model,
+            messages=[
+                {"role": "developer" if "gpt-4o" in llm_model else "system", "content": SYSTEM_PROMPT},
+                {"role": "user", "content": USER_PROMPT}
+            ],
             temperature=0.0,
             max_completion_tokens=16,
             extra_body={"guided_choice": ["Yes.", "No."]},
@@ -194,8 +204,46 @@ Answer:
     doc_relevant = inner()
     return "yes" in doc_relevant.choices[0].message.content.lower()
 
+def gen_community_summary(llm_model, base_url, samples):
+    SYSTEM_PROMPT = """You are analyzing a collection of tweets from a group of people who generally share a common ideology or belief system. Each tweet may either be a standalone post or a reply to another tweet. If it is a reply, the original tweet will be provided within <CONTEXT></CONTEXT> tags, followed by the user's response after "RESPONSE:".
 
-def gen_user_prompt(articles, kg, samples, input_post):
+Your task is determining the broad ideological category that best represents the group's overall stance. The ideological classification should be general and widely recognized. Do not use niche subcategories or specific affiliations. You should also generate a short description of the ideological category so that people can impersonate the group members later. This description *SHOULD* be general and widely recognized description of the ideological category, *DO NOT* mention specific things related to the sample tweets.
+
+# Guidelines:
+
+- Prioritize how users respond in their RESPONSE: to infer their stance if the context exists.
+- Identify recurring themes, attitudes, and perspectives across multiple responses.
+- If multiple ideologies are present, choose the most dominant three based on frequency and consistency.
+- Your output should be concise and objective.
+- The tweets may be multilingual, but the output should summarize in English.
+
+# Output Format:
+{
+    "ideology": <Your summary here>, 
+    "description": <Your concise description of the ideology category/categories>, 
+    "reasoning": <reasoning in string> 
+}
+"""
+    USER_PROMPT = f"""Here are the sample tweets:
+{'\n\n'.join([f"\"\"\"\n{n}\n\"\"\"" for n in samples])}
+"""
+    json_schema = IdeologySummary.model_json_schema()
+    @retry(wait=wait_random_exponential(multiplier=1, max=8), stop=stop_after_attempt(8))
+    def inner():
+        client = OpenAI(api_key=os.getenv("OPENAI_API_KEY"), base_url=base_url)
+        return json.loads(client.chat.completions.create(
+            model=llm_model,
+            messages=[
+                {"role": "developer" if "gpt-4o" in llm_model else "system", "content": SYSTEM_PROMPT},
+                {"role": "user", "content": USER_PROMPT}
+            ],
+            temperature=0.0,
+            max_completion_tokens=512,
+            extra_body={"guided_json": json_schema},
+        ).choices[0].message.content)
+    return inner()
+
+def gen_user_prompt(articles, kg, samples, community_summary, input_post):
     return f"""The following news and entity relations are the latest information for you to know.
 <NEWS_ARTICLE_SNIPPETS>
 {'\n\n'.join([f"\"\"\"\n{article.page_content}\n\"\"\"" for article in articles])}
@@ -210,6 +258,8 @@ The following are examples of how other users in *YOUR* community respond to pos
 <RESPONSE_EXAMPLES>
 {'\n\n'.join([f"\"\"\"\n{n}\n\"\"\"" for n in samples])}
 </RESPONSE_EXAMPLES>
+
+Your community is {community_summary['ideology']}, described as {community_summary['description']}.
 
 
 New post:
