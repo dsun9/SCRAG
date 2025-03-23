@@ -114,5 +114,5 @@ for k, v in tqdm(outputs.items(), ncols=100):
     pd.to_pickle(v, '../../data/separated_for_belief/{}.pkl'.format(k))
 # %%
 for k in outputs:
-    print(f'python src/utils/belief_emb/scrag_emb.py --dim 2 --input data/separated_for_belief/{k}.pkl --output data/separated_for_belief/{k}_2.npy')
+    print(f'python src/emb_scripts/belief_emb/emb_belief.py --dim 2 --input data/separated_for_belief/{k}.pkl --output data/separated_for_belief/{k}_2.npy')
 # %%
